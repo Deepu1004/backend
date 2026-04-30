@@ -6,10 +6,12 @@ import shutil
 import time
 import os
 from datetime import datetime
+from typing import Annotated
 from dotenv import load_dotenv
 
 from metadata_extractor import extract_file_metadata
 from risk_scoring import RiskScorer
+from users import build_editor_session, is_editor_credentials
 from database import (
     add_submission,
     get_all_submissions,
@@ -44,19 +46,59 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 risk_scorer = RiskScorer()
 
-@app.get("/api/health")
+
+@app.get("/", responses={200: {"description": "Service is running"}})
+async def root():
+    return {
+        "message": "AuthorPrint API is running",
+        "health": "/api/health",
+        "docs": "/docs",
+    }
+
+@app.get("/api/health", responses={200: {"description": "Health check response"}})
 async def health_check():
     return {"status": "ok", "timestamp": time.time()}
 
-@app.post("/api/upload")
+
+@app.post(
+    "/api/auth/editor",
+    responses={
+        200: {"description": "Editor authenticated successfully"},
+        401: {"description": "Invalid editor credentials"},
+    },
+)
+async def auth_editor(request: Request):
+    content_type = request.headers.get("content-type", "")
+    email = ""
+    password = ""
+
+    if "application/json" in content_type:
+        payload = await request.json()
+        email = str(payload.get("email", ""))
+        password = str(payload.get("password", ""))
+    else:
+        form = await request.form()
+        email = str(form.get("email", ""))
+        password = str(form.get("password", ""))
+
+    if not is_editor_credentials(email, password):
+        raise HTTPException(status_code=401, detail="Invalid editor credentials")
+
+    return {
+        "success": True,
+        "message": "Editor authenticated successfully",
+        "user": build_editor_session(),
+    }
+
+@app.post("/api/upload", responses={500: {"description": "Upload or analysis failed"}})
 async def upload_submission(
-    file: UploadFile = File(...),
-    fingerprint: str = Form(...),
-    email: str = Form(...),
-    journal: str = Form(default="Unknown Journal"),
-    author_name: str = Form(default="Anonymous"),
-    document_type: str = Form(default="Paper"),
-    document_kind: str = Form(default="Science")
+    file: Annotated[UploadFile, File(...)],
+    fingerprint: Annotated[str, Form(...)],
+    email: Annotated[str, Form(...)],
+    journal: Annotated[str, Form(default="Unknown Journal")],
+    author_name: Annotated[str, Form(default="Anonymous")],
+    document_type: Annotated[str, Form(default="Paper")],
+    document_kind: Annotated[str, Form(default="Science")],
 ):
     """
     Upload a paper and perform fraud detection
@@ -138,7 +180,7 @@ async def upload_submission(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/submissions")
+@app.get("/api/submissions", responses={500: {"description": "Failed to list submissions"}})
 async def list_submissions():
     """Get all submissions for the editor dashboard"""
     try:
@@ -169,7 +211,13 @@ async def list_submissions():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/submissions/{submission_id}")
+@app.get(
+    "/api/submissions/{submission_id}",
+    responses={
+        400: {"description": "Invalid request"},
+        404: {"description": "Submission not found"},
+    },
+)
 async def get_submission_details(submission_id: str):
     """Get full details for a specific submission"""
     try:
@@ -200,11 +248,18 @@ async def get_submission_details(submission_id: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/api/submissions/{submission_id}/decision")
+@app.post(
+    "/api/submissions/{submission_id}/decision",
+    responses={
+        400: {"description": "Decision must be accept or reject"},
+        404: {"description": "Submission not found"},
+        500: {"description": "Failed to update review decision"},
+    },
+)
 async def update_review_decision(
     submission_id: str,
-    decision: str = Form(...),
-    reviewer_name: str = Form(default="Editor"),
+    decision: Annotated[str, Form(...)],
+    reviewer_name: Annotated[str, Form(default="Editor")],
 ):
     """Accept or reject a submission after scanning."""
     try:
@@ -217,7 +272,7 @@ async def update_review_decision(
             raise HTTPException(status_code=400, detail="Decision must be accept or reject")
 
         review_status = "accepted" if normalized_decision == "accept" else "rejected"
-        updated_submission = update_submission(
+        update_submission(
             submission_id,
             {
                 "workflow_status": review_status,
@@ -240,7 +295,7 @@ async def update_review_decision(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/stats")
+@app.get("/api/stats", responses={500: {"description": "Failed to load statistics"}})
 async def get_dashboard_stats():
     """Get statistics for the editor dashboard"""
     try:
