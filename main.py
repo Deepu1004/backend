@@ -95,10 +95,10 @@ async def upload_submission(
     file: Annotated[UploadFile, File(...)],
     fingerprint: Annotated[str, Form(...)],
     email: Annotated[str, Form(...)],
-    journal: Annotated[str, Form(default="Unknown Journal")],
-    author_name: Annotated[str, Form(default="Anonymous")],
-    document_type: Annotated[str, Form(default="Paper")],
-    document_kind: Annotated[str, Form(default="Science")],
+    journal: Annotated[str, Form()] = "Unknown Journal",
+    author_name: Annotated[str, Form()] = "Anonymous",
+    document_type: Annotated[str, Form()] = "Paper",
+    document_kind: Annotated[str, Form()] = "Science",
 ):
     """
     Upload a paper and perform fraud detection
@@ -259,7 +259,7 @@ async def get_submission_details(submission_id: str):
 async def update_review_decision(
     submission_id: str,
     decision: Annotated[str, Form(...)],
-    reviewer_name: Annotated[str, Form(default="Editor")],
+    reviewer_name: Annotated[str, Form()] = "Editor",
 ):
     """Accept or reject a submission after scanning."""
     try:
