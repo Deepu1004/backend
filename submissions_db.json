@@ -1,0 +1,50 @@
+{
+  "submissions": [
+    {
+      "email": "test@test.com",
+      "fingerprint": "123",
+      "journal": "J",
+      "author_name": "Author",
+      "file_name": "test.txt",
+      "saved_file": "1777533427029_test.txt",
+      "file_url": "http://localhost:8000/uploads/1777533427029_test.txt",
+      "file_size": 11,
+      "metadata": {
+        "author": "",
+        "file_size": 11,
+        "text_sample": "Hello World",
+        "total_words": 2,
+        "total_lines": 1,
+        "content_hash": "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e",
+        "document_type": "Paper",
+        "document_kind": "Science"
+      },
+      "risk_score": 0,
+      "risk_level": "low",
+      "signals": [
+        "\u2713 New device fingerprint"
+      ],
+      "risk_factors": {
+        "fingerprint_first_submission": true,
+        "fingerprint_fingerprint_matches": 0,
+        "metadata_metadata_score": 0,
+        "behavior_velocity": 0,
+        "content_content_score": 0
+      },
+      "linked_accounts": [
+        "test@test.com"
+      ],
+      "workflow_status": "accepted",
+      "analysis_status": "queued",
+      "review_status": "accepted",
+      "review_decision": "accept",
+      "reviewer_name": "Editor",
+      "reviewed_at": 1777533441.014265,
+      "scan_started_at": null,
+      "scan_completed_at": null,
+      "id": "sub_1777533427.030994",
+      "timestamp": "2026-04-30T12:47:07.030998"
+    }
+  ],
+  "accounts": {}
+}
