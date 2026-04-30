@@ -1,0 +1,228 @@
+================================================================================
+                    QUICK DEPLOY CHECKLIST - DO THIS NOW
+================================================================================
+
+Your Setup:
+  ✓ Backend Code: Ready (main.py, database.py, etc.)
+  ✓ Frontend Deployed: https://tnf-risk-analyzer.vercel.app/
+  ✓ Code Updated: CORS and environment variables configured
+  ✓ Environment Files: .env and .env.example created
+
+================================================================================
+                         DEPLOYMENT STEPS
+================================================================================
+
+[ 1 ]  VERIFY YOUR CODE IS READY
+
+        Terminal Command:
+        $ cd /Users/satyanagasai.deepakvaranasi/Documents/Vibe\ Coding\ Challenge/backend
+        $ ls -la
+
+        You should see:
+        ✓ main.py
+        ✓ database.py
+        ✓ metadata_extractor.py
+        ✓ risk_scoring.py
+        ✓ users.py
+        ✓ requirements.txt
+        ✓ .env
+        ✓ .env.example
+        ✓ readme.txt
+        ✓ backend_code.txt
+        ✓ RENDER_DEPLOYMENT.md
+
+[ 2 ]  PUSH CODE TO GITHUB
+
+        Terminal Commands:
+        $ git add .
+        $ git commit -m "Configure backend for production deployment on Render"
+        $ git push -u origin main
+
+        Verify: https://github.com/Deepu1004/backend
+        (You should see your updated files)
+
+[ 3 ]  GO TO RENDER WEBSITE
+
+        1. Open: https://render.com
+        2. Click "New +"
+        3. Select "Web Service"
+        4. Select your "backend" repository
+        5. Click "Connect"
+
+[ 4 ]  CONFIGURE ON RENDER
+
+        Fill in these EXACT values:
+
+        Name:           authorprint-backend
+        Region:         us-east-1
+        Branch:         main
+        Root Directory: (leave empty)
+        Runtime:        Python 3
+
+        Build Command:  $ pip install -r requirements.txt
+        Start Command:  $ uvicorn main:app --host 0.0.0.0 --port 8000
+
+        Instance Type:  Free (or Starter for production)
+        Auto-Deploy:    Enable ✓
+
+[ 5 ]  ADD ENVIRONMENT VARIABLES (BEFORE CLICKING CREATE)
+
+        Click "Add Environment Variable" and add these:
+
+        ┌─────────────────────────────────────────────────────┐
+        │ KEY                  │ VALUE                         │
+        ├─────────────────────────────────────────────────────┤
+        │ BACKEND_URL          │ https://authorprint-backend-  │
+        │                      │ xxxx.onrender.com (ADD AFTER) │
+        │                      │                               │
+        │ FRONTEND_URL         │ https://tnf-risk-analyzer.    │
+        │                      │ vercel.app                    │
+        │                      │                               │
+        │ PORT                 │ 8000                          │
+        │                      │                               │
+        │ HOST                 │ 0.0.0.0                       │
+        │                      │                               │
+        │ DEBUG                │ False                         │
+        │                      │                               │
+        │ PYTHONUNBUFFERED     │ 1                             │
+        └─────────────────────────────────────────────────────┘
+
+        NOTE: Leave BACKEND_URL empty or put placeholder for now
+
+[ 6 ]  CLICK "CREATE WEB SERVICE"
+
+        Render will start deploying!
+        Watch the build logs - it takes 2-5 minutes
+
+        You should see:
+        ✓ "Building your service"
+        ✓ "pip install" running
+        ✓ "Application startup complete"
+
+[ 7 ]  GET YOUR BACKEND URL
+
+        Once deployment completes, you'll see your URL:
+
+        ► https://authorprint-backend-xxxx.onrender.com
+
+        COPY THIS URL (you need it next)
+
+[ 8 ]  ADD BACKEND_URL ENVIRONMENT VARIABLE
+
+        1. In Render Dashboard, click your service
+        2. Go to "Environment" section
+        3. Edit "BACKEND_URL"
+        4. Set it to: https://authorprint-backend-xxxx.onrender.com
+        5. Click "Save"
+
+        Service will redeploy automatically!
+
+[ 9 ]  TEST YOUR BACKEND
+
+        Open in browser:
+        https://authorprint-backend-xxxx.onrender.com/api/health
+
+        You should see:
+        {"status": "ok", "timestamp": 1234567890.123}
+
+        API Docs:
+        https://authorprint-backend-xxxx.onrender.com/docs
+
+[ 10]  UPDATE FRONTEND
+
+        Your frontend at https://tnf-risk-analyzer.vercel.app
+        needs to know your backend URL!
+
+        If your frontend has API configuration:
+
+        OLD: http://localhost:8000
+        NEW: https://authorprint-backend-xxxx.onrender.com
+
+        Then redeploy frontend on Vercel.
+
+[ 11]  TEST END-TO-END
+
+        1. Go to https://tnf-risk-analyzer.vercel.app/
+        2. Try uploading a file
+        3. Check that it works without errors
+        4. Check browser console (F12) for any CORS errors
+
+        If CORS errors appear:
+        - Verify FRONTEND_URL is set correctly as environment variable
+        - It must include https://
+
+[ 12]  SUCCESS!
+
+        Your application is now live!
+
+        Frontend: https://tnf-risk-analyzer.vercel.app/
+        Backend:  https://authorprint-backend-xxxx.onrender.com
+
+================================================================================
+                         WHAT WAS UPDATED
+================================================================================
+
+1. MAIN.PY
+   - Added environment variable support
+   - CORS now allows your frontend URL
+   - File URLs use BACKEND_URL instead of localhost
+
+2. .ENV
+   - Configuration for local development
+   - BACKEND_URL=http://localhost:8000
+   - FRONTEND_URL=http://localhost:3000
+
+3. .ENV.EXAMPLE
+   - Template showing required variables
+   - For reference and production setup
+
+4. RENDER_DEPLOYMENT.MD
+   - Complete step-by-step deployment guide
+   - Troubleshooting section included
+
+5. REQUIREMENTS.TXT
+   - Already includes python-dotenv for environment variables
+
+================================================================================
+                      IMPORTANT NOTES
+================================================================================
+
+✓ CORS is configured to allow your frontend
+✓ Environment variables support multiple environments (local/production)
+✓ File URLs will work correctly on Render
+✓ HTTPS is automatically configured by Render
+
+FIRST TIME RENDER DEPLOY?
+  - Your service URL example: https://authorprint-backend-xyz123.onrender.com
+  - Free tier auto-sleeps after 15 min inactivity (upgrade for persistent)
+  - Build takes 2-5 minutes total
+
+IF DEPLOYMENT FAILS:
+  - Check Render logs for error messages
+  - Verify requirements.txt is complete
+  - Ensure main.py is at project root
+  - Common issue: python-magic library (Render docs have fix)
+
+================================================================================
+                        GET HELP
+================================================================================
+
+Documentation Files Created:
+  • readme.txt              - Full application guide
+  • backend_code.txt        - Complete source code
+  • RENDER_DEPLOYMENT.md    - Detailed deployment steps
+  • .env.example            - Environment variables template
+
+Resources:
+  • Render Docs: https://render.com/docs
+  • FastAPI Docs: https://fastapi.tiangolo.com/
+  • Your Frontend: https://tnf-risk-analyzer.vercel.app/
+
+URLs Needed:
+  • Frontend: https://tnf-risk-analyzer.vercel.app
+  • GitHub Repo: https://github.com/Deepu1004/backend
+  • Render Dashboard: https://render.com/dashboard
+
+================================================================================
+                    READY TO DEPLOY? START WITH STEP 1!
+================================================================================

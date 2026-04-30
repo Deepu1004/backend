@@ -1,0 +1,1163 @@
+================================================================================
+                     AUTHORPRINT BACKEND - COMPLETE SOURCE CODE
+================================================================================
+
+File: main.py
+================================================================================
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import shutil
+import time
+from datetime import datetime
+
+from metadata_extractor import extract_file_metadata
+from risk_scoring import RiskScorer
+from database import (
+    add_submission,
+    get_all_submissions,
+    get_submission_by_id,
+    update_submission,
+    get_stats
+)
+
+app = FastAPI(title="AuthorPrint API")
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Ensure upload directory exists
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+# Mount static files for serving uploaded PDFs
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+risk_scorer = RiskScorer()
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok", "timestamp": time.time()}
+
+@app.post("/api/upload")
+async def upload_submission(
+    file: UploadFile = File(...),
+    fingerprint: str = Form(...),
+    email: str = Form(...),
+    journal: str = Form(default="Unknown Journal"),
+    author_name: str = Form(default="Anonymous"),
+    document_type: str = Form(default="Paper"),
+    document_kind: str = Form(default="Science")
+):
+    """
+    Upload a paper and perform fraud detection
+    """
+    try:
+        # Save uploaded file
+        timestamp = int(time.time() * 1000)
+        saved_filename = f"{timestamp}_{file.filename}"
+        file_path = UPLOAD_DIR / saved_filename
+        
+        with file_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Extract metadata
+        metadata = extract_file_metadata(str(file_path))
+        metadata["document_type"] = document_type
+        metadata["document_kind"] = document_kind
+        
+        # Calculate risk score
+        risk_result = risk_scorer.calculate_risk_score(
+            fingerprint=fingerprint,
+            email=email,
+            metadata=metadata,
+            file_name=file.filename
+        )
+        
+        # Prepare submission data
+        submission_data = {
+            "email": email,
+            "fingerprint": fingerprint,
+            "journal": journal,
+            "author_name": author_name,
+            "file_name": file.filename,
+            "saved_file": saved_filename,
+            "file_url": f"http://localhost:8000/uploads/{saved_filename}",
+            "file_size": file.size,
+            "metadata": metadata,
+            "risk_score": risk_result["risk_score"],
+            "risk_level": risk_result["risk_level"],
+            "signals": risk_result["signals"],
+            "risk_factors": risk_result["risk_factors"],
+            "linked_accounts": risk_result["linked_accounts"],
+            "workflow_status": "pending",
+            "analysis_status": "queued",
+            "review_status": "pending",
+            "review_decision": None,
+            "reviewer_name": None,
+            "reviewed_at": None,
+            "scan_started_at": None,
+            "scan_completed_at": None,
+        }
+        
+        # Check for similar document
+        all_subs = get_all_submissions()
+        similar_doc = None
+        if document_type and document_kind:
+            for sub in all_subs:
+                sub_meta = sub.get("metadata", {})
+                if sub_meta.get("document_type") == document_type and sub_meta.get("document_kind") == document_kind:
+                    similar_doc = {
+                        "file_name": sub.get("file_name"),
+                        "type": document_type,
+                        "kind": document_kind,
+                        "content_preview": sub_meta.get("content_sample", "Content preview not available.")
+                    }
+                    break
+                    
+        # Add to database
+        submission_id = add_submission(submission_data)
+        
+        return {
+            "success": True,
+            "submission_id": submission_id,
+            "risk_score": risk_result["risk_score"],
+            "risk_level": risk_result["risk_level"],
+            "similar_document": similar_doc
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/submissions")
+async def list_submissions():
+    """Get all submissions for the editor dashboard"""
+    try:
+        submissions = get_all_submissions()
+        
+        # Format for frontend
+        formatted_subs = []
+        for sub in submissions:
+            formatted_subs.append({
+                "id": sub.get("id"),
+                "title": sub.get("file_name"),
+                "author_name": sub.get("author_name"),
+                "email": sub.get("email"),
+                "journal": sub.get("journal"),
+                "timestamp": sub.get("timestamp"),
+                "score": sub.get("risk_score", 0),
+                "workflow_status": sub.get("workflow_status", "pending"),
+                "account_count": len(sub.get("linked_accounts", [])),
+                "signals": sub.get("signals", []),
+                "file_url": sub.get("file_url"),
+                "file_name": sub.get("file_name")
+            })
+            
+        # Sort by timestamp (newest first)
+        formatted_subs.sort(key=lambda x: x["timestamp"], reverse=True)
+        
+        return {"submissions": formatted_subs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/submissions/{submission_id}")
+async def get_submission_details(submission_id: str):
+    """Get full details for a specific submission"""
+    try:
+        submission = get_submission_by_id(submission_id)
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+            
+        return {
+            "submission": {
+                "id": submission.get("id"),
+                "title": submission.get("file_name"),
+                "author_name": submission.get("author_name"),
+                "email": submission.get("email"),
+                "journal": submission.get("journal"),
+                "timestamp": submission.get("timestamp"),
+                "score": submission.get("risk_score", 0),
+                "workflow_status": submission.get("workflow_status", "pending"),
+                "file_url": submission.get("file_url"),
+                "metadata": submission.get("metadata", {}),
+                "risk_level": submission.get("risk_level", "low"),
+                "signals": submission.get("signals", []),
+                "risk_factors": submission.get("risk_factors", {}),
+                "linked_accounts": submission.get("linked_accounts", []),
+                "account_count": len(submission.get("linked_accounts", [])),
+                "recommendation": submission.get("recommendation"),
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/submissions/{submission_id}/decision")
+async def update_review_decision(
+    submission_id: str,
+    decision: str = Form(...),
+    reviewer_name: str = Form(default="Editor"),
+):
+    """Accept or reject a submission after scanning."""
+    try:
+        submission = get_submission_by_id(submission_id)
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+
+        normalized_decision = decision.lower().strip()
+        if normalized_decision not in {"accept", "reject"}:
+            raise HTTPException(status_code=400, detail="Decision must be accept or reject")
+
+        review_status = "accepted" if normalized_decision == "accept" else "rejected"
+        updated_submission = update_submission(
+            submission_id,
+            {
+                "workflow_status": review_status,
+                "review_status": review_status,
+                "review_decision": normalized_decision,
+                "reviewer_name": reviewer_name,
+                "reviewed_at": time.time(),
+            },
+        )
+
+        return {
+            "success": True,
+            "submission_id": submission_id,
+            "workflow_status": review_status
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/stats")
+async def get_dashboard_stats():
+    """Get statistics for the editor dashboard"""
+    try:
+        return get_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+================================================================================
+File: database.py
+================================================================================
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Any
+import threading
+
+BASE_DIR = Path(__file__).resolve().parent
+DB_FILE = BASE_DIR / "submissions_db.json"
+LOCK = threading.Lock()
+
+
+def init_db():
+    """Initialize database file if it doesn't exist"""
+    if not DB_FILE.exists():
+        with DB_FILE.open("w") as f:
+            json.dump({"submissions": [], "accounts": {}}, f, indent=2)
+
+
+def load_db() -> Dict[str, Any]:
+    """Load database from JSON file"""
+    with LOCK:
+        if not DB_FILE.exists():
+            init_db()
+        with DB_FILE.open("r") as f:
+            return json.load(f)
+
+
+def save_db(data: Dict[str, Any]):
+    """Save database to JSON file"""
+    with LOCK:
+        with DB_FILE.open("w") as f:
+            json.dump(data, f, indent=2)
+
+
+def add_submission(submission_data: Dict[str, Any]) -> str:
+    """Add a new submission to database"""
+    db = load_db()
+    submission_id = f"sub_{datetime.now().timestamp()}"
+    
+    submission_data["id"] = submission_id
+    submission_data["timestamp"] = datetime.now().isoformat()
+    
+    db["submissions"].append(submission_data)
+    save_db(db)
+    
+    return submission_id
+
+
+def update_submission(submission_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Update a submission and return the updated record."""
+    db = load_db()
+
+    for index, submission in enumerate(db.get("submissions", [])):
+        if submission.get("id") == submission_id:
+            db["submissions"][index] = {**submission, **updates}
+            save_db(db)
+            return db["submissions"][index]
+
+    return None
+
+
+def get_all_submissions() -> List[Dict[str, Any]]:
+    """Get all submissions from database"""
+    db = load_db()
+    return db.get("submissions", [])
+
+
+def get_submission_by_id(submission_id: str) -> Dict[str, Any]:
+    """Get a specific submission"""
+    db = load_db()
+    for sub in db.get("submissions", []):
+        if sub.get("id") == submission_id:
+            return sub
+    return None
+
+
+def get_submissions_by_fingerprint(fingerprint: str) -> List[Dict[str, Any]]:
+    """Get all submissions with the same fingerprint"""
+    db = load_db()
+    return [
+        sub for sub in db.get("submissions", [])
+        if sub.get("fingerprint") == fingerprint
+    ]
+
+
+def get_submissions_by_content_hash(content_hash: str) -> List[Dict[str, Any]]:
+    """Get all submissions with the same uploaded file hash"""
+    db = load_db()
+    return [
+        sub for sub in db.get("submissions", [])
+        if sub.get("metadata", {}).get("content_hash") == content_hash
+    ]
+
+
+def get_submissions_by_email(email: str) -> List[Dict[str, Any]]:
+    """Get all submissions from a specific email"""
+    db = load_db()
+    return [
+        sub for sub in db.get("submissions", [])
+        if sub.get("email") == email
+    ]
+
+
+def get_recent_submissions(minutes: int = 10) -> List[Dict[str, Any]]:
+    """Get submissions from the last N minutes"""
+    from datetime import datetime, timedelta
+    
+    db = load_db()
+    cutoff_time = datetime.now() - timedelta(minutes=minutes)
+    
+    recent = []
+    for sub in db.get("submissions", []):
+        try:
+            sub_time = datetime.fromisoformat(sub.get("timestamp", ""))
+            if sub_time > cutoff_time:
+                recent.append(sub)
+        except Exception:
+            pass
+    
+    return recent
+
+
+def link_accounts(fingerprint: str, emails: List[str]) -> Dict[str, Any]:
+    """Get all accounts linked by a fingerprint"""
+    db = load_db()
+    linked = list(dict.fromkeys(emails or []))
+    
+    for sub in db.get("submissions", []):
+        if sub.get("fingerprint") == fingerprint:
+            email = sub.get("email")
+            if email not in linked:
+                linked.append(email)
+    
+    return {
+        "fingerprint": fingerprint,
+        "linked_accounts": linked,
+        "account_count": len(linked)
+    }
+
+
+def get_author_metadata_matches(author: str, creator: str) -> List[Dict[str, Any]]:
+    """Find all submissions with matching author metadata"""
+    db = load_db()
+    matches = []
+    
+    for sub in db.get("submissions", []):
+        metadata = sub.get("metadata", {})
+        if (metadata.get("author") == author or 
+            metadata.get("creator") == creator):
+            matches.append(sub)
+    
+    return matches
+
+
+def clear_db():
+    """Clear all data (for testing)"""
+    with LOCK:
+        if DB_FILE.exists():
+            DB_FILE.unlink()
+        init_db()
+
+
+def get_stats() -> Dict[str, Any]:
+    """Get dashboard statistics"""
+    db = load_db()
+    submissions = db.get("submissions", [])
+    
+    total = len(submissions)
+    high_risk = 0
+    critical_risk = 0
+    total_score = 0
+    
+    for sub in submissions:
+        score = sub.get("risk_score", 0)
+        total_score += score
+        if score >= 80:
+            critical_risk += 1
+        elif score >= 60:
+            high_risk += 1
+            
+    avg_score = round(total_score / total, 1) if total > 0 else 0
+    
+    return {
+        "total_submissions": total,
+        "high_risk_submissions": high_risk,
+        "critical_risk_submissions": critical_risk,
+        "average_risk_score": avg_score
+    }
+
+
+================================================================================
+File: metadata_extractor.py
+================================================================================
+
+import hashlib
+import os
+from typing import Dict, Any, Optional
+import mimetypes
+
+try:
+    import fitz  # PyMuPDF for PDFs
+except ImportError:
+    fitz = None
+
+try:
+    from docx import Document  # python-docx for Word files
+except ImportError:
+    Document = None
+
+
+def _hash_file(file_path: str) -> str:
+    """Generate a stable SHA-256 hash for the full file content."""
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def extract_pdf_metadata(file_path: str) -> Dict[str, Any]:
+    """Extract metadata from PDF file"""
+    if not fitz:
+        return {"error": "PyMuPDF not installed"}
+    
+    try:
+        doc = fitz.open(file_path)
+        metadata = doc.metadata or {}
+        
+        # Extract standard PDF metadata
+        result = {
+            "author": metadata.get("author", ""),
+            "title": metadata.get("title", ""),
+            "subject": metadata.get("subject", ""),
+            "creator": metadata.get("creator", ""),
+            "producer": metadata.get("producer", ""),
+            "creation_date": str(metadata.get("creationDate", "")),
+            "mod_date": str(metadata.get("modDate", "")),
+            "pages": len(doc),
+            "file_size": os.path.getsize(file_path),
+            "content_hash": _hash_file(file_path),
+        }
+        
+        # Extract text from first 2 pages for style analysis
+        text_sample = ""
+        for page_num in range(min(2, len(doc))):
+            text_sample += doc[page_num].get_text() + "\n"
+        
+        result["text_sample"] = text_sample[:2000]  # First 2000 chars
+        result["total_words"] = len(text_sample.split())
+        
+        # Add classification
+        classification = classify_document(text_sample)
+        result.update(classification)
+        
+        doc.close()
+        return result
+    except Exception as e:
+        return {"error": f"Failed to extract PDF metadata: {str(e)}"}
+
+
+def extract_docx_metadata(file_path: str) -> Dict[str, Any]:
+    """Extract metadata from DOCX file"""
+    if not Document:
+        return {"error": "python-docx not installed"}
+    
+    try:
+        doc = Document(file_path)
+        props = doc.core_properties
+        
+        result = {
+            "author": props.author or "",
+            "title": props.title or "",
+            "subject": props.subject or "",
+            "creator": "Microsoft Word",
+            "created": str(props.created) if props.created else "",
+            "modified": str(props.modified) if props.modified else "",
+            "file_size": os.path.getsize(file_path),
+            "paragraphs": len(doc.paragraphs),
+            "tables": len(doc.tables),
+            "content_hash": _hash_file(file_path),
+        }
+        
+        # Extract text sample
+        text_sample = ""
+        for para in doc.paragraphs[:20]:  # First 20 paragraphs
+            text_sample += para.text + "\n"
+        
+        result["text_sample"] = text_sample[:2000]
+        result["total_words"] = len(text_sample.split())
+        
+        # Add classification
+        classification = classify_document(text_sample)
+        result.update(classification)
+        
+        return result
+    except Exception as e:
+        return {"error": f"Failed to extract DOCX metadata: {str(e)}"}
+
+
+def extract_txt_metadata(file_path: str) -> Dict[str, Any]:
+    """Extract metadata from TXT file"""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        result = {
+            "author": "",
+            "file_size": os.path.getsize(file_path),
+            "text_sample": content[:2000],
+            "total_words": len(content.split()),
+            "total_lines": len(content.split('\n')),
+            "content_hash": _hash_file(file_path),
+        }
+        
+        # Add classification
+        classification = classify_document(content[:2000])
+        result.update(classification)
+        
+        return result
+    except Exception as e:
+        return {"error": f"Failed to extract TXT metadata: {str(e)}"}
+
+
+def extract_file_metadata(file_path: str) -> Dict[str, Any]:
+    """
+    Extract metadata from uploaded file based on file type
+    """
+    if not os.path.exists(file_path):
+        return {"error": "File not found"}
+    
+    # Get file extension
+    _, ext = os.path.splitext(file_path)
+    ext = ext.lower()
+    
+    # Route to appropriate extractor
+    if ext == ".pdf":
+        return extract_pdf_metadata(file_path)
+    elif ext == ".docx":
+        return extract_docx_metadata(file_path)
+    elif ext == ".txt":
+        return extract_txt_metadata(file_path)
+    else:
+        return {
+            "error": f"Unsupported file type: {ext}",
+            "file_size": os.path.getsize(file_path),
+            "file_type": ext,
+            "content_hash": _hash_file(file_path),
+        }
+
+def classify_document(text: str) -> Dict[str, str]:
+    text_lower = text.lower()
+    
+    doc_type = "paper"
+    if "chapter" in text_lower or "book" in text_lower:
+        doc_type = "book"
+    elif "journal" in text_lower or "volume" in text_lower or "issue" in text_lower:
+        doc_type = "journal"
+        
+    doc_kind = "science"
+    if any(k in text_lower for k in ["engineering", "architecture", "design", "mechanic"]):
+        doc_kind = "engineering"
+    elif any(k in text_lower for k in ["medical", "health", "clinical", "patient", "disease"]):
+        doc_kind = "medical"
+        
+    return {
+        "document_type": doc_type,
+        "document_kind": doc_kind
+    }
+
+
+def analyze_document_similarity(
+    metadata1: Dict[str, Any],
+    metadata2: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Analyze similarity between two documents
+    """
+    similarity_score = 0
+    matching_fields = []
+    
+    # Author match
+    if (metadata1.get("author") and metadata2.get("author") and
+        metadata1.get("author") == metadata2.get("author")):
+        similarity_score += 25
+        matching_fields.append("author")
+    
+    # Creator/Software match
+    if (metadata1.get("creator") and metadata2.get("creator") and
+        metadata1.get("creator") == metadata2.get("creator")):
+        similarity_score += 15
+        matching_fields.append("creator")
+    
+    # Title similarity
+    if (metadata1.get("title") and metadata2.get("title") and
+        metadata1.get("title").lower() == metadata2.get("title").lower()):
+        similarity_score += 20
+        matching_fields.append("title")
+    
+    # Text similarity (basic word overlap)
+    text1 = metadata1.get("text_sample", "").lower()
+    text2 = metadata2.get("text_sample", "").lower()
+    
+    if text1 and text2:
+        words1 = set(text1.split())
+        words2 = set(text2.split())
+        if len(words1) > 0 and len(words2) > 0:
+            overlap = len(words1 & words2) / len(words1 | words2)
+            text_similarity = int(overlap * 100)
+            similarity_score += text_similarity // 4  # Weight it less
+            if overlap > 0.3:
+                matching_fields.append("text_content")
+    
+    return {
+        "similarity_score": min(similarity_score, 100),
+        "matching_fields": matching_fields
+    }
+
+
+================================================================================
+File: risk_scoring.py
+================================================================================
+
+from typing import Dict, List, Any
+from datetime import datetime, timedelta
+import time
+import database
+
+
+class RiskScorer:
+    """Calculate fraud risk score based on multiple signals"""
+    
+    def __init__(self):
+        self.max_score = 100
+        self.risk_levels = {
+            "low": (0, 30),
+            "medium": (30, 60),
+            "high": (60, 85),
+            "critical": (85, 101)
+        }
+    
+    def calculate_risk_score(
+        self,
+        fingerprint: str,
+        email: str,
+        metadata: Dict[str, Any],
+        file_name: str
+    ) -> Dict[str, Any]:
+        """
+        Calculate comprehensive risk score based on 5 layers
+        """
+        score = 0
+        signals = []
+        risk_factors = {}
+        
+        # Layer 1: Device Fingerprint Analysis
+        fp_score, fp_signals, fp_factors = self._analyze_fingerprint(fingerprint)
+        score += fp_score
+        signals.extend(fp_signals)
+        risk_factors.update({f"fingerprint_{k}": v for k, v in fp_factors.items()})
+        
+        # Layer 2: Document Metadata Forensics
+        meta_score, meta_signals, meta_factors = self._analyze_metadata(metadata, fingerprint)
+        score += meta_score
+        signals.extend(meta_signals)
+        risk_factors.update({f"metadata_{k}": v for k, v in meta_factors.items()})
+        
+        # Layer 3: Behavioral Patterns
+        behav_score, behav_signals, behav_factors = self._analyze_behavior(
+            fingerprint, email, file_name
+        )
+        score += behav_score
+        signals.extend(behav_signals)
+        risk_factors.update({f"behavior_{k}": v for k, v in behav_factors.items()})
+        
+        # Layer 4: Writing Style (if text available)
+        style_score, style_signals, style_factors = self._analyze_writing_style(metadata)
+        score += style_score
+        signals.extend(style_signals)
+        risk_factors.update({f"style_{k}": v for k, v in style_factors.items()})
+        
+        # Layer 5: Content Similarity
+        content_score, content_signals, content_factors = self._analyze_content(
+            metadata, fingerprint
+        )
+        score += content_score
+        signals.extend(content_signals)
+        risk_factors.update({f"content_{k}": v for k, v in content_factors.items()})
+        
+        # Cap the score at 100
+        final_score = min(int(score), 100)
+        
+        # Determine risk level
+        risk_level = self._get_risk_level(final_score)
+        
+        # Get linked accounts
+        linked_info = database.link_accounts(fingerprint, [email])
+        
+        return {
+            "risk_score": final_score,
+            "risk_level": risk_level,
+            "signals": signals,
+            "risk_factors": risk_factors,
+            "linked_accounts": linked_info.get("linked_accounts", []),
+            "account_count": linked_info.get("account_count", 1),
+            "recommendation": self._get_recommendation(final_score, signals)
+        }
+    
+    def _analyze_fingerprint(self, fingerprint: str) -> tuple:
+        """Layer 1: Device Fingerprint Analysis"""
+        score = 0
+        signals = []
+        factors = {}
+        
+        # Check if this fingerprint has been seen before
+        matching_subs = database.get_submissions_by_fingerprint(fingerprint)
+        
+        if len(matching_subs) == 0:
+            signals.append("✓ New device fingerprint")
+            factors["first_submission"] = True
+            score += 0
+        elif len(matching_subs) == 1:
+            signals.append("• Device seen before (1 prior account)")
+            factors["prior_accounts"] = 1
+            score += 5
+        elif len(matching_subs) <= 3:
+            signals.append(f"⚠ Device fingerprint matches {len(matching_subs)} prior accounts")
+            factors["prior_accounts"] = len(matching_subs)
+            score += 30
+        else:
+            signals.append(f"🔴 Device fingerprint matches {len(matching_subs)} prior accounts")
+            factors["prior_accounts"] = len(matching_subs)
+            score += 40
+        
+        factors["fingerprint_matches"] = len(matching_subs)
+        
+        return score, signals, factors
+    
+    def _analyze_metadata(self, metadata: Dict[str, Any], fingerprint: str) -> tuple:
+        """Layer 2: Document Metadata Forensics"""
+        score = 0
+        signals = []
+        factors = {}
+        
+        if metadata.get("error"):
+            return 0, [], {}
+        
+        author = metadata.get("author", "")
+        creator = metadata.get("creator", "")
+        
+        # Check for author/creator metadata
+        if author:
+            similar_docs = database.get_author_metadata_matches(author, creator)
+            if len(similar_docs) > 1:
+                score += 20
+                signals.append(f"⚠ Document author '{author}' found in {len(similar_docs)} submissions")
+                factors["author_matches"] = len(similar_docs)
+        
+        # Check for creator/software match
+        if creator:
+            creator_matches = [
+                s for s in database.get_submissions_by_fingerprint(fingerprint)
+                if s.get("metadata", {}).get("creator") == creator
+            ]
+            if len(creator_matches) > 1:
+                score += 15
+                signals.append(f"• Same document editor: {creator}")
+                factors["creator_matches"] = len(creator_matches)
+        
+        # Check file size consistency (might indicate templates)
+        file_size = metadata.get("file_size", 0)
+        if file_size > 0:
+            similar_sizes = [
+                s for s in database.get_submissions_by_fingerprint(fingerprint)
+                if abs(s.get("metadata", {}).get("file_size", 0) - file_size) < file_size * 0.1
+            ]
+            if len(similar_sizes) > 2:
+                score += 10
+                signals.append("• Similar file sizes (possible template reuse)")
+                factors["size_pattern"] = len(similar_sizes)
+        
+        # Check for suspiciously old creation dates
+        creation_date = metadata.get("creation_date", "")
+        if creation_date and ("1970" in creation_date or "1980" in creation_date):
+            score += 5
+            signals.append("• Suspicious creation date (possible metadata manipulation)")
+            factors["date_manipulation"] = True
+        
+        factors["metadata_score"] = score
+        return score, signals, factors
+    
+    def _analyze_behavior(
+        self, fingerprint: str, email: str, file_name: str
+    ) -> tuple:
+        """Layer 3: Behavioral Patterns"""
+        score = 0
+        signals = []
+        factors = {}
+        
+        # Check upload velocity
+        recent_subs = database.get_recent_submissions(minutes=10)
+        fingerprint_velocity = len(
+            [s for s in recent_subs if s.get("fingerprint") == fingerprint]
+        )
+        
+        if fingerprint_velocity >= 5:
+            score += 35
+            signals.append(f"🔴 BULK UPLOAD: {fingerprint_velocity} files in 10 minutes")
+            factors["bulk_upload"] = fingerprint_velocity
+        elif fingerprint_velocity >= 3:
+            score += 25
+            signals.append(f"⚠ Multiple uploads: {fingerprint_velocity} files in 10 minutes")
+            factors["rapid_upload"] = fingerprint_velocity
+        elif fingerprint_velocity >= 2:
+            score += 10
+            signals.append(f"• {fingerprint_velocity} uploads in short timeframe")
+            factors["multiple_uploads"] = fingerprint_velocity
+
+        email_submissions = database.get_submissions_by_email(email)
+        if len(email_submissions) > 1:
+            score += 5
+            signals.append(f"• Email seen in {len(email_submissions)} submissions")
+            factors["email_reuse"] = len(email_submissions)
+        
+        # Check file naming patterns
+        similar_names = [
+            s for s in database.get_submissions_by_fingerprint(fingerprint)
+            if self._check_file_name_pattern(s.get("file_name", ""), file_name)
+        ]
+        if len(similar_names) > 1:
+            score += 15
+            signals.append(f"⚠ File naming pattern detected ({len(similar_names)} similar names)")
+            factors["naming_pattern"] = len(similar_names)
+        
+        # Check submission timing patterns (e.g., always at night)
+        all_by_fp = database.get_submissions_by_fingerprint(fingerprint)
+        if len(all_by_fp) >= 2:
+            hours = []
+            for sub in all_by_fp:
+                try:
+                    dt = datetime.fromisoformat(sub.get("timestamp", ""))
+                    hours.append(dt.hour)
+                except Exception:
+                    pass
+            
+            # Check for unusual timing (e.g., all between 2-4 AM)
+            if hours and all(h >= 2 and h <= 4 for h in hours) and len(hours) >= 2:
+                score += 20
+                signals.append("• Suspicious timing pattern (automated submissions?)")
+                factors["timing_pattern"] = True
+        
+        factors["velocity"] = fingerprint_velocity
+        return score, signals, factors
+    
+    def _analyze_writing_style(self, metadata: Dict[str, Any]) -> tuple:
+        """Layer 4: Writing Style Fingerprint"""
+        score = 0
+        signals = []
+        factors = {}
+        
+        text_sample = metadata.get("text_sample", "")
+        if not text_sample or len(text_sample) < 100:
+            return 0, [], {}
+        
+        # Basic style analysis
+        words = text_sample.split()
+        sentences = text_sample.split('.')
+        
+        if len(sentences) > 0 and len(words) > 0:
+            avg_sentence_length = len(words) / len(sentences)
+            
+            # Unusual sentence length patterns
+            if avg_sentence_length < 5 or avg_sentence_length > 50:
+                score += 5
+                signals.append(f"• Unusual sentence structure (avg: {avg_sentence_length:.1f} words)")
+                factors["unusual_style"] = True
+        
+        # Check for vocabulary richness
+        unique_words = len({w.lower() for w in words if len(w) > 3})
+        vocabulary_ratio = unique_words / len(words) if len(words) > 0 else 0
+        
+        if vocabulary_ratio < 0.3:  # Low vocabulary diversity
+            score += 5
+            signals.append("• Low vocabulary diversity (possible AI-generated?)")
+            factors["low_vocabulary"] = vocabulary_ratio
+        
+        factors["writing_style_score"] = score
+        return score, signals, factors
+    
+    def _analyze_content(self, metadata: Dict[str, Any], fingerprint: str) -> tuple:
+        """Layer 5: Content Similarity"""
+        score = 0
+        signals = []
+        factors = {}
+
+        exact_score, exact_signals, exact_factors = self._score_exact_duplicates(metadata)
+        score += exact_score
+        signals.extend(exact_signals)
+        factors.update(exact_factors)
+
+        text_sample = metadata.get("text_sample", "")
+        if text_sample:
+            similarity_score, similarity_signals, similarity_factors = self._score_text_similarity(
+                text_sample,
+                fingerprint,
+            )
+            score += similarity_score
+            signals.extend(similarity_signals)
+            factors.update(similarity_factors)
+
+            ai_score, ai_signals, ai_factors = self._score_ai_markers(text_sample)
+            score += ai_score
+            signals.extend(ai_signals)
+            factors.update(ai_factors)
+
+        factors["content_score"] = score
+        return score, signals, factors
+
+    def _score_exact_duplicates(self, metadata: Dict[str, Any]) -> tuple:
+        """Score exact file duplicates across the entire corpus."""
+        content_hash = metadata.get("content_hash", "")
+        text_sample = metadata.get("text_sample", "")
+
+        exact_duplicates = []
+        if content_hash:
+            exact_duplicates = database.get_submissions_by_content_hash(content_hash)
+
+        if not exact_duplicates and text_sample:
+            exact_duplicates = [
+                sub
+                for sub in database.get_all_submissions()
+                if sub.get("metadata", {}).get("text_sample", "") == text_sample
+            ]
+
+        if not exact_duplicates:
+            return 0, [], {}
+
+        score = 35
+        signals = [
+            f"🔴 Exact file duplicate detected in {len(exact_duplicates)} prior submission(s)"
+        ]
+        factors = {"exact_file_duplicates": len(exact_duplicates)}
+        return score, signals, factors
+
+    def _score_text_similarity(self, text_sample: str, fingerprint: str) -> tuple:
+        """Score similarity between the current text and prior submissions."""
+        score = 0
+        signals = []
+        factors = {}
+
+        current_words = set(text_sample.lower().split())
+        if len(current_words) <= 10:
+            return 0, [], {}
+
+        for prev_sub in database.get_submissions_by_fingerprint(fingerprint):
+            prev_text = prev_sub.get("metadata", {}).get("text_sample", "")
+            if not prev_text or prev_text == text_sample:
+                continue
+
+            prev_words = set(prev_text.lower().split())
+            if len(prev_words) <= 10:
+                continue
+
+            overlap = len(current_words & prev_words) / len(current_words | prev_words)
+            if overlap > 0.7:
+                score += 20
+                signals.append("🔴 Content 70%+ similar to previous submission")
+                factors["high_similarity"] = overlap
+                break
+            if overlap > 0.5:
+                score += 10
+                signals.append("⚠ Content 50%+ similar to previous submission")
+                factors["medium_similarity"] = overlap
+                break
+
+        return score, signals, factors
+
+    def _score_ai_markers(self, text_sample: str) -> tuple:
+        """Score obvious AI-style marker usage."""
+        ai_markers = ["however", "furthermore", "in conclusion", "in summary", "notably"]
+        marker_count = sum(1 for marker in ai_markers if marker in text_sample.lower())
+
+        if marker_count < 3:
+            return 0, [], {}
+
+        score = 5
+        signals = ["• Possible AI-generated content (academic markers detected)"]
+        factors = {"ai_markers": marker_count}
+        return score, signals, factors
+    
+    def _check_file_name_pattern(self, name1: str, name2: str) -> bool:
+        """Check if two filenames follow a pattern"""
+        # Strip extensions
+        n1 = name1.rsplit(".", 1)[0].lower()
+        n2 = name2.rsplit(".", 1)[0].lower()
+        
+        # Check for version patterns like Paper_v1, Paper_v2
+        import re
+        pattern1 = re.sub(r'_v\d+|_\d+|v\d+', '', n1)
+        pattern2 = re.sub(r'_v\d+|_\d+|v\d+', '', n2)
+        
+        if pattern1 == pattern2 and pattern1:
+            return True
+        
+        # Check for common prefixes
+        if len(n1) >= 5 and len(n2) >= 5 and n1[:5] == n2[:5]:
+            return True
+        
+        return False
+    
+    def _get_risk_level(self, score: int) -> str:
+        """Determine risk level based on score"""
+        for level, (low, high) in self.risk_levels.items():
+            if low <= score < high:
+                return level
+        return "critical"
+    
+    def _get_recommendation(self, score: int, signals: List[str]) -> str:
+        """Generate recommendation based on score and signals"""
+        if score < 30:
+            return "✓ APPROVED: Submission appears legitimate"
+        elif score < 60:
+            return "⚠ REVIEW: Manual review recommended"
+        elif score < 85:
+            return "🔴 FLAG: High risk - likely spam/duplicate accounts"
+        else:
+            return "🚫 REJECT: Critical risk - suspected multi-account abuse"
+
+
+================================================================================
+File: users.py
+================================================================================
+
+"""Shared user definitions for the single editor account."""
+
+from typing import Dict
+
+EDITOR_ACCOUNT = {
+	"name": "Editor",
+	"email": "editor@tnf.com",
+	"password": "editor@123",
+}
+
+
+def get_editor_account() -> Dict[str, str]:
+	"""Return the configured editor identity."""
+	return dict(EDITOR_ACCOUNT)
+
+
+def is_editor_credentials(email: str, password: str) -> bool:
+	"""Check whether the supplied credentials match the editor account."""
+	return email.strip().lower() == EDITOR_ACCOUNT["email"] and password == EDITOR_ACCOUNT["password"]
+
+
+def build_editor_session() -> Dict[str, str]:
+	"""Build the session payload used by the frontend after editor login."""
+	return {
+		"name": EDITOR_ACCOUNT["name"],
+		"email": EDITOR_ACCOUNT["email"],
+		"role": "editor",
+		"authenticated": True,
+	}
+
+
+================================================================================
+File: requirements.txt
+================================================================================
+
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+PyMuPDF==1.23.8
+python-docx==0.8.11
+redis==5.0.1
+numpy==1.24.3
+scikit-learn==1.3.2
+scipy==1.11.4
+spacy==3.7.2
+sentence-transformers==2.2.2
+torch==2.1.1
+python-magic==0.4.27
+Pillow==10.1.0
+python-dotenv==1.0.0
+cors==1.0.1
+pydantic==2.5.0
+
+
+================================================================================
+                              END OF SOURCE CODE
+================================================================================
+
+This is the complete source code for the AuthorPrint Backend API. All files have
+been included with their full content. The application consists of:
+
+1. main.py - FastAPI application and endpoint definitions
+2. database.py - JSON-based database operations
+3. metadata_extractor.py - Document metadata extraction and processing
+4. risk_scoring.py - Multi-layer fraud detection risk scoring engine
+5. users.py - Editor account management
+6. requirements.txt - Python dependencies specification
+
+Total Application Size: ~15KB of Python code
+Database: JSON-based (submissions_db.json)
+File Storage: Local uploads/ directory
+
+For deployment, usage guides, and more information, refer to the readme.txt file.
+
+================================================================================
+                         Last Updated: April 30, 2026
+================================================================================

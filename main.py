@@ -1,10 +1,12 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import shutil
 import time
+import os
 from datetime import datetime
+from dotenv import load_dotenv
 
 from metadata_extractor import extract_file_metadata
 from risk_scoring import RiskScorer
@@ -16,12 +18,18 @@ from database import (
     get_stats
 )
 
+load_dotenv()
+
 app = FastAPI(title="AuthorPrint API")
 
-# Configure CORS
+# Configuration
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# Configure CORS with frontend URL
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:8000", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -83,7 +91,7 @@ async def upload_submission(
             "author_name": author_name,
             "file_name": file.filename,
             "saved_file": saved_filename,
-            "file_url": f"http://localhost:8000/uploads/{saved_filename}",
+            "file_url": f"{BACKEND_URL}/uploads/{saved_filename}",
             "file_size": file.size,
             "metadata": metadata,
             "risk_score": risk_result["risk_score"],
