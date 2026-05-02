@@ -373,6 +373,11 @@ PYTHONUNBUFFERED=1
 DEBUG=False
 ENVIRONMENT=production
 
+Firebase note:
+- Keep the Firebase service account on the backend only.
+- Do not put the service account JSON in the frontend.
+- If the frontend ever talks directly to Firebase, it should only receive the public web config, not secret credentials.
+
 Example .env:
   PORT=8000
   DEBUG=False

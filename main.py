@@ -16,6 +16,7 @@ from database import (
     add_submission,
     get_all_submissions,
     get_submission_by_id,
+    upload_file_to_firebase_storage,
     update_submission,
     get_stats
 )
@@ -116,6 +117,12 @@ async def upload_submission(
         metadata = extract_file_metadata(str(file_path))
         metadata["document_type"] = document_type
         metadata["document_kind"] = document_kind
+
+        firebase_file_url = upload_file_to_firebase_storage(
+            str(file_path),
+            f"uploads/{saved_filename}",
+        )
+        file_url = firebase_file_url or f"{BACKEND_URL}/uploads/{saved_filename}"
         
         # Calculate risk score
         risk_result = risk_scorer.calculate_risk_score(
@@ -133,7 +140,7 @@ async def upload_submission(
             "author_name": author_name,
             "file_name": file.filename,
             "saved_file": saved_filename,
-            "file_url": f"{BACKEND_URL}/uploads/{saved_filename}",
+            "file_url": file_url,
             "file_size": file.size,
             "metadata": metadata,
             "risk_score": risk_result["risk_score"],
