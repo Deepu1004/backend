@@ -14,6 +14,7 @@ from risk_scoring import RiskScorer
 from users import build_editor_session, is_editor_credentials
 from database import (
     add_submission,
+    delete_submission,
     get_all_submissions,
     get_submission_by_id,
     upload_file_to_firebase_storage,
@@ -198,6 +199,7 @@ async def list_submissions():
         for sub in submissions:
             formatted_subs.append({
                 "id": sub.get("id"),
+                "fingerprint": sub.get("fingerprint"),
                 "title": sub.get("file_name"),
                 "author_name": sub.get("author_name"),
                 "email": sub.get("email"),
@@ -235,6 +237,7 @@ async def get_submission_details(submission_id: str):
         return {
             "submission": {
                 "id": submission.get("id"),
+                "fingerprint": submission.get("fingerprint"),
                 "title": submission.get("file_name"),
                 "author_name": submission.get("author_name"),
                 "email": submission.get("email"),
@@ -300,6 +303,27 @@ async def update_review_decision(
     except Exception as e:
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete(
+    "/api/submissions/{submission_id}",
+    responses={
+        404: {"description": "Submission not found"},
+        500: {"description": "Failed to delete submission"},
+    },
+)
+async def delete_submission_record(submission_id: str):
+    """Delete a submission and its associated uploaded file."""
+    try:
+        deleted_submission = delete_submission(submission_id)
+        if not deleted_submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stats", responses={500: {"description": "Failed to load statistics"}})

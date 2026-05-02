@@ -24,6 +24,7 @@ FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "submissions")
 _FIREBASE_APP = None
 _FIRESTORE_CLIENT = None
 _FIREBASE_MIGRATED = False
+UPLOADS_DIR = BASE_DIR / "uploads"
 
 
 def _get_service_account_info() -> Optional[Dict[str, Any]]:
@@ -170,6 +171,79 @@ def _delete_firestore_collection() -> None:
 
     for document in client.collection(FIRESTORE_COLLECTION).stream():
         document.reference.delete()
+
+
+def _delete_storage_object(storage_path: Optional[str]) -> None:
+    if not storage_path:
+        return
+
+    bucket = _initialize_storage_bucket()
+    if bucket is not None:
+        blob = bucket.blob(storage_path)
+        try:
+            blob.delete()
+        except Exception:
+            pass
+
+    local_file = UPLOADS_DIR / Path(storage_path).name
+    if local_file.exists():
+        try:
+            local_file.unlink()
+        except Exception:
+            pass
+
+
+def _resolve_storage_path(submission: Dict[str, Any]) -> Optional[str]:
+    saved_file = submission.get("saved_file")
+    if saved_file:
+        return f"uploads/{saved_file}"
+
+    file_url = submission.get("file_url", "")
+    if "/uploads/" in file_url:
+        return f"uploads/{file_url.rsplit('/uploads/', 1)[-1]}"
+
+    return None
+
+
+def delete_submission_files(submission: Dict[str, Any]) -> None:
+    _delete_storage_object(_resolve_storage_path(submission))
+
+
+def delete_submission(submission_id: str) -> Optional[Dict[str, Any]]:
+    deleted_submission = get_submission_by_id(submission_id)
+    if not deleted_submission:
+        return None
+
+    delete_submission_files(deleted_submission)
+
+    if _is_firestore_mode():
+        client = _initialize_firestore_client()
+        if client is None:
+            return None
+        client.collection(FIRESTORE_COLLECTION).document(submission_id).delete()
+        return deleted_submission
+
+    with LOCK:
+        if not DB_FILE.exists():
+            return None
+
+        with DB_FILE.open("r", encoding="utf-8") as file_handle:
+            data = json.load(file_handle)
+
+        submissions = data.get("submissions", [])
+        remaining_submissions = [
+            submission for submission in submissions
+            if submission.get("id") != submission_id
+        ]
+
+        if len(remaining_submissions) == len(submissions):
+            return None
+
+        data["submissions"] = remaining_submissions
+        with DB_FILE.open("w", encoding="utf-8") as file_handle:
+            json.dump(data, file_handle, indent=2)
+
+    return deleted_submission
 
 
 def init_db():
