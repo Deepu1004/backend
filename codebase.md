@@ -1,34 +1,64 @@
-================================================================================
-                     AUTHORPRINT BACKEND - COMPLETE SOURCE CODE
-================================================================================
+# Backend Codebase — Complete Source Code
 
-File: main.py
-================================================================================
+**Project:** TNF Vibe Coding Challenge — Scholar Risk Detector  
+**Backend:** Python + FastAPI + Optional Firebase/Firestore  
+**Purpose:** Fraud detection, metadata extraction, risk scoring, and manuscript submission management
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+---
+
+## Table of Contents
+
+1. [main.py](#mainpy) — FastAPI application and HTTP endpoints
+2. [database.py](#databasepy) — JSON/Firestore database layer
+3. [metadata_extractor.py](#metadata_extractorpy) — PDF/DOCX metadata extraction
+4. [risk_scoring.py](#risk_scoringpy) — Multi-layer fraud detection scoring
+5. [users.py](#userspy) — Simple editor authentication
+6. [requirements.txt](#requirementstxt) — Python dependencies
+7. [runtime.txt](#runtimetxt) — Python version specification
+
+---
+
+## main.py
+
+FastAPI REST API for manuscript upload, analysis, and editorial review.
+
+```python
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import shutil
 import time
+import os
 from datetime import datetime
+from typing import Annotated
+from dotenv import load_dotenv
 
 from metadata_extractor import extract_file_metadata
 from risk_scoring import RiskScorer
+from users import build_editor_session, is_editor_credentials
 from database import (
     add_submission,
+    delete_submission,
     get_all_submissions,
     get_submission_by_id,
+    upload_file_to_firebase_storage,
     update_submission,
     get_stats
 )
 
+load_dotenv()
+
 app = FastAPI(title="AuthorPrint API")
 
-# Configure CORS
+# Configuration
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# Configure CORS with frontend URL
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:8000", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,19 +73,59 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 risk_scorer = RiskScorer()
 
-@app.get("/api/health")
+
+@app.get("/", responses={200: {"description": "Service is running"}})
+async def root():
+    return {
+        "message": "AuthorPrint API is running",
+        "health": "/api/health",
+        "docs": "/docs",
+    }
+
+@app.get("/api/health", responses={200: {"description": "Health check response"}})
 async def health_check():
     return {"status": "ok", "timestamp": time.time()}
 
-@app.post("/api/upload")
+
+@app.post(
+    "/api/auth/editor",
+    responses={
+        200: {"description": "Editor authenticated successfully"},
+        401: {"description": "Invalid editor credentials"},
+    },
+)
+async def auth_editor(request: Request):
+    content_type = request.headers.get("content-type", "")
+    email = ""
+    password = ""
+
+    if "application/json" in content_type:
+        payload = await request.json()
+        email = str(payload.get("email", ""))
+        password = str(payload.get("password", ""))
+    else:
+        form = await request.form()
+        email = str(form.get("email", ""))
+        password = str(form.get("password", ""))
+
+    if not is_editor_credentials(email, password):
+        raise HTTPException(status_code=401, detail="Invalid editor credentials")
+
+    return {
+        "success": True,
+        "message": "Editor authenticated successfully",
+        "user": build_editor_session(),
+    }
+
+@app.post("/api/upload", responses={500: {"description": "Upload or analysis failed"}})
 async def upload_submission(
-    file: UploadFile = File(...),
-    fingerprint: str = Form(...),
-    email: str = Form(...),
-    journal: str = Form(default="Unknown Journal"),
-    author_name: str = Form(default="Anonymous"),
-    document_type: str = Form(default="Paper"),
-    document_kind: str = Form(default="Science")
+    file: Annotated[UploadFile, File(...)],
+    fingerprint: Annotated[str, Form(...)],
+    email: Annotated[str, Form(...)],
+    journal: Annotated[str, Form()] = "Unknown Journal",
+    author_name: Annotated[str, Form()] = "Anonymous",
+    document_type: Annotated[str, Form()] = "Paper",
+    document_kind: Annotated[str, Form()] = "Science",
 ):
     """
     Upload a paper and perform fraud detection
@@ -73,6 +143,12 @@ async def upload_submission(
         metadata = extract_file_metadata(str(file_path))
         metadata["document_type"] = document_type
         metadata["document_kind"] = document_kind
+
+        firebase_file_url = upload_file_to_firebase_storage(
+            str(file_path),
+            f"uploads/{saved_filename}",
+        )
+        file_url = firebase_file_url or f"{BACKEND_URL}/uploads/{saved_filename}"
         
         # Calculate risk score
         risk_result = risk_scorer.calculate_risk_score(
@@ -90,7 +166,7 @@ async def upload_submission(
             "author_name": author_name,
             "file_name": file.filename,
             "saved_file": saved_filename,
-            "file_url": f"http://localhost:8000/uploads/{saved_filename}",
+            "file_url": file_url,
             "file_size": file.size,
             "metadata": metadata,
             "risk_score": risk_result["risk_score"],
@@ -137,7 +213,7 @@ async def upload_submission(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/submissions")
+@app.get("/api/submissions", responses={500: {"description": "Failed to list submissions"}})
 async def list_submissions():
     """Get all submissions for the editor dashboard"""
     try:
@@ -148,6 +224,7 @@ async def list_submissions():
         for sub in submissions:
             formatted_subs.append({
                 "id": sub.get("id"),
+                "fingerprint": sub.get("fingerprint"),
                 "title": sub.get("file_name"),
                 "author_name": sub.get("author_name"),
                 "email": sub.get("email"),
@@ -168,7 +245,13 @@ async def list_submissions():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/submissions/{submission_id}")
+@app.get(
+    "/api/submissions/{submission_id}",
+    responses={
+        400: {"description": "Invalid request"},
+        404: {"description": "Submission not found"},
+    },
+)
 async def get_submission_details(submission_id: str):
     """Get full details for a specific submission"""
     try:
@@ -179,6 +262,7 @@ async def get_submission_details(submission_id: str):
         return {
             "submission": {
                 "id": submission.get("id"),
+                "fingerprint": submission.get("fingerprint"),
                 "title": submission.get("file_name"),
                 "author_name": submission.get("author_name"),
                 "email": submission.get("email"),
@@ -199,11 +283,18 @@ async def get_submission_details(submission_id: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/api/submissions/{submission_id}/decision")
+@app.post(
+    "/api/submissions/{submission_id}/decision",
+    responses={
+        400: {"description": "Decision must be accept or reject"},
+        404: {"description": "Submission not found"},
+        500: {"description": "Failed to update review decision"},
+    },
+)
 async def update_review_decision(
     submission_id: str,
-    decision: str = Form(...),
-    reviewer_name: str = Form(default="Editor"),
+    decision: Annotated[str, Form(...)],
+    reviewer_name: Annotated[str, Form()] = "Editor",
 ):
     """Accept or reject a submission after scanning."""
     try:
@@ -216,7 +307,7 @@ async def update_review_decision(
             raise HTTPException(status_code=400, detail="Decision must be accept or reject")
 
         review_status = "accepted" if normalized_decision == "accept" else "rejected"
-        updated_submission = update_submission(
+        update_submission(
             submission_id,
             {
                 "workflow_status": review_status,
@@ -232,39 +323,289 @@ async def update_review_decision(
             "submission_id": submission_id,
             "workflow_status": review_status
         }
-    except HTTPException:
-        raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/stats")
+@app.delete("/api/submissions/{submission_id}", responses={500: {"description": "Delete failed"}})
+async def delete_submission_endpoint(submission_id: str):
+    """Delete a submission and its associated files"""
+    try:
+        deleted = delete_submission(submission_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        return {"success": True, "deleted_id": submission_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/stats", responses={500: {"description": "Failed to fetch stats"}})
 async def get_dashboard_stats():
-    """Get statistics for the editor dashboard"""
+    """Get dashboard statistics"""
     try:
         return get_stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+```
 
+---
 
-================================================================================
-File: database.py
-================================================================================
+## database.py
 
+Database abstraction layer supporting JSON file storage and Firebase Firestore.
+
+```python
+import base64
 import json
-from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Any
+import os
 import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    from firebase_admin import storage as firebase_storage
+except ImportError:
+    firebase_admin = None
+    credentials = None
+    firestore = None
+    firebase_storage = None
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_FILE = BASE_DIR / "submissions_db.json"
 LOCK = threading.Lock()
+FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "submissions")
+
+_FIREBASE_APP = None
+_FIRESTORE_CLIENT = None
+_FIREBASE_MIGRATED = False
+UPLOADS_DIR = BASE_DIR / "uploads"
+
+
+def _get_service_account_info() -> Optional[Dict[str, Any]]:
+    raw_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if raw_json:
+        return json.loads(raw_json)
+
+    raw_b64 = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON_B64")
+    if raw_b64:
+        decoded = base64.b64decode(raw_b64).decode("utf-8")
+        return json.loads(decoded)
+
+    credentials_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
+    if credentials_path:
+        with open(credentials_path, "r", encoding="utf-8") as file_handle:
+            return json.load(file_handle)
+
+    return None
+
+
+def _firebase_enabled() -> bool:
+    return firebase_admin is not None and _get_service_account_info() is not None
+
+
+def _initialize_firestore_client():
+    global _FIREBASE_APP, _FIRESTORE_CLIENT
+
+    if _FIRESTORE_CLIENT is not None:
+        return _FIRESTORE_CLIENT
+
+    if not _firebase_enabled():
+        return None
+
+    if not firebase_admin._apps:
+        service_account_info = _get_service_account_info()
+        app_options: Dict[str, Any] = {}
+
+        project_id = os.getenv("FIREBASE_PROJECT_ID")
+        if project_id:
+            app_options["projectId"] = project_id
+
+        storage_bucket = os.getenv("FIREBASE_STORAGE_BUCKET")
+        if storage_bucket:
+            app_options["storageBucket"] = storage_bucket
+
+        cred = credentials.Certificate(service_account_info)
+        if app_options:
+            _FIREBASE_APP = firebase_admin.initialize_app(cred, app_options)
+        else:
+            _FIREBASE_APP = firebase_admin.initialize_app(cred)
+    else:
+        _FIREBASE_APP = firebase_admin.get_app()
+
+    _FIRESTORE_CLIENT = firestore.client()
+    _migrate_local_json_to_firestore(_FIRESTORE_CLIENT)
+    return _FIRESTORE_CLIENT
+
+
+def _initialize_storage_bucket():
+    if not _firebase_enabled() or firebase_storage is None:
+        return None
+
+    _initialize_firestore_client()
+    return firebase_storage.bucket()
+
+
+def _is_firestore_mode() -> bool:
+    return _initialize_firestore_client() is not None
+
+
+def _normalize_submission(submission_data: Dict[str, Any], submission_id: Optional[str] = None) -> Dict[str, Any]:
+    normalized = dict(submission_data)
+    normalized["id"] = submission_id or normalized.get("id") or f"sub_{datetime.now().timestamp()}"
+    normalized["timestamp"] = normalized.get("timestamp") or datetime.now().isoformat()
+    return normalized
+
+
+def _submission_docs_to_dicts() -> List[Dict[str, Any]]:
+    client = _initialize_firestore_client()
+    if client is None:
+        return []
+
+    submissions: List[Dict[str, Any]] = []
+    for document in client.collection(FIRESTORE_COLLECTION).stream():
+        record = document.to_dict() or {}
+        record["id"] = record.get("id") or document.id
+        submissions.append(record)
+
+    return submissions
+
+
+def _migrate_local_json_to_firestore(client) -> None:
+    global _FIREBASE_MIGRATED
+
+    if _FIREBASE_MIGRATED:
+        return
+
+    existing_doc = next(client.collection(FIRESTORE_COLLECTION).limit(1).stream(), None)
+    if existing_doc is not None:
+        _FIREBASE_MIGRATED = True
+        return
+
+    if not DB_FILE.exists():
+        _FIREBASE_MIGRATED = True
+        return
+
+    try:
+        with DB_FILE.open("r", encoding="utf-8") as file_handle:
+            local_db = json.load(file_handle)
+    except Exception:
+        _FIREBASE_MIGRATED = True
+        return
+
+    for submission in local_db.get("submissions", []):
+        normalized = _normalize_submission(submission)
+        client.collection(FIRESTORE_COLLECTION).document(normalized["id"]).set(normalized)
+
+    _FIREBASE_MIGRATED = True
+
+
+def upload_file_to_firebase_storage(local_file_path: str, storage_path: str) -> Optional[str]:
+    """Upload a file to Firebase Storage and return a long-lived download URL."""
+    bucket = _initialize_storage_bucket()
+    if bucket is None:
+        return None
+
+    blob = bucket.blob(storage_path)
+    blob.upload_from_filename(local_file_path)
+
+    try:
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.now(timezone.utc) + timedelta(days=3650),
+            method="GET",
+        )
+    except Exception:
+        return None
+
+
+def _delete_firestore_collection() -> None:
+    client = _initialize_firestore_client()
+    if client is None:
+        return
+
+    for document in client.collection(FIRESTORE_COLLECTION).stream():
+        document.reference.delete()
+
+
+def _delete_storage_object(storage_path: Optional[str]) -> None:
+    if not storage_path:
+        return
+
+    bucket = _initialize_storage_bucket()
+    if bucket is not None:
+        blob = bucket.blob(storage_path)
+        try:
+            blob.delete()
+        except Exception:
+            pass
+
+    local_file = UPLOADS_DIR / Path(storage_path).name
+    if local_file.exists():
+        try:
+            local_file.unlink()
+        except Exception:
+            pass
+
+
+def _resolve_storage_path(submission: Dict[str, Any]) -> Optional[str]:
+    saved_file = submission.get("saved_file")
+    if saved_file:
+        return f"uploads/{saved_file}"
+
+    file_url = submission.get("file_url", "")
+    if "/uploads/" in file_url:
+        return f"uploads/{file_url.rsplit('/uploads/', 1)[-1]}"
+
+    return None
+
+
+def delete_submission_files(submission: Dict[str, Any]) -> None:
+    _delete_storage_object(_resolve_storage_path(submission))
+
+
+def delete_submission(submission_id: str) -> Optional[Dict[str, Any]]:
+    deleted_submission = get_submission_by_id(submission_id)
+    if not deleted_submission:
+        return None
+
+    delete_submission_files(deleted_submission)
+
+    if _is_firestore_mode():
+        client = _initialize_firestore_client()
+        if client is None:
+            return None
+        client.collection(FIRESTORE_COLLECTION).document(submission_id).delete()
+        return deleted_submission
+
+    with LOCK:
+        if not DB_FILE.exists():
+            return None
+
+        with DB_FILE.open("r", encoding="utf-8") as file_handle:
+            data = json.load(file_handle)
+
+        submissions = data.get("submissions", [])
+        remaining_submissions = [
+            submission for submission in submissions
+            if submission.get("id") != submission_id
+        ]
+
+        if len(remaining_submissions) == len(submissions):
+            return None
+
+        data["submissions"] = remaining_submissions
+        with DB_FILE.open("w", encoding="utf-8") as file_handle:
+            json.dump(data, file_handle, indent=2)
+
+    return deleted_submission
 
 
 def init_db():
     """Initialize database file if it doesn't exist"""
+    if _is_firestore_mode():
+        return
+
     if not DB_FILE.exists():
         with DB_FILE.open("w") as f:
             json.dump({"submissions": [], "accounts": {}}, f, indent=2)
@@ -272,6 +613,9 @@ def init_db():
 
 def load_db() -> Dict[str, Any]:
     """Load database from JSON file"""
+    if _is_firestore_mode():
+        return {"submissions": _submission_docs_to_dicts(), "accounts": {}}
+
     with LOCK:
         if not DB_FILE.exists():
             init_db()
@@ -281,6 +625,17 @@ def load_db() -> Dict[str, Any]:
 
 def save_db(data: Dict[str, Any]):
     """Save database to JSON file"""
+    if _is_firestore_mode():
+        client = _initialize_firestore_client()
+        if client is None:
+            return
+
+        _delete_firestore_collection()
+        for submission in data.get("submissions", []):
+            normalized = _normalize_submission(submission)
+            client.collection(FIRESTORE_COLLECTION).document(normalized["id"]).set(normalized)
+        return
+
     with LOCK:
         with DB_FILE.open("w") as f:
             json.dump(data, f, indent=2)
@@ -288,20 +643,40 @@ def save_db(data: Dict[str, Any]):
 
 def add_submission(submission_data: Dict[str, Any]) -> str:
     """Add a new submission to database"""
+    normalized = _normalize_submission(submission_data)
+    submission_id = normalized["id"]
+
+    if _is_firestore_mode():
+        client = _initialize_firestore_client()
+        if client is not None:
+            client.collection(FIRESTORE_COLLECTION).document(submission_id).set(normalized)
+            return submission_id
+
     db = load_db()
-    submission_id = f"sub_{datetime.now().timestamp()}"
-    
-    submission_data["id"] = submission_id
-    submission_data["timestamp"] = datetime.now().isoformat()
-    
-    db["submissions"].append(submission_data)
+    db.setdefault("submissions", []).append(normalized)
     save_db(db)
-    
+
     return submission_id
 
 
 def update_submission(submission_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
     """Update a submission and return the updated record."""
+    if _is_firestore_mode():
+        client = _initialize_firestore_client()
+        if client is None:
+            return None
+
+        document_ref = client.collection(FIRESTORE_COLLECTION).document(submission_id)
+        snapshot = document_ref.get()
+        if not snapshot.exists:
+            return None
+
+        document_ref.update(updates)
+        updated_submission = snapshot.to_dict() or {}
+        updated_submission.update(updates)
+        updated_submission["id"] = updated_submission.get("id") or submission_id
+        return updated_submission
+
     db = load_db()
 
     for index, submission in enumerate(db.get("submissions", [])):
@@ -315,12 +690,28 @@ def update_submission(submission_id: str, updates: Dict[str, Any]) -> Dict[str, 
 
 def get_all_submissions() -> List[Dict[str, Any]]:
     """Get all submissions from database"""
+    if _is_firestore_mode():
+        return _submission_docs_to_dicts()
+
     db = load_db()
     return db.get("submissions", [])
 
 
 def get_submission_by_id(submission_id: str) -> Dict[str, Any]:
     """Get a specific submission"""
+    if _is_firestore_mode():
+        client = _initialize_firestore_client()
+        if client is None:
+            return None
+
+        snapshot = client.collection(FIRESTORE_COLLECTION).document(submission_id).get()
+        if not snapshot.exists:
+            return None
+
+        submission = snapshot.to_dict() or {}
+        submission["id"] = submission.get("id") or submission_id
+        return submission
+
     db = load_db()
     for sub in db.get("submissions", []):
         if sub.get("id") == submission_id:
@@ -330,6 +721,12 @@ def get_submission_by_id(submission_id: str) -> Dict[str, Any]:
 
 def get_submissions_by_fingerprint(fingerprint: str) -> List[Dict[str, Any]]:
     """Get all submissions with the same fingerprint"""
+    if _is_firestore_mode():
+        return [
+            sub for sub in get_all_submissions()
+            if sub.get("fingerprint") == fingerprint
+        ]
+
     db = load_db()
     return [
         sub for sub in db.get("submissions", [])
@@ -339,6 +736,12 @@ def get_submissions_by_fingerprint(fingerprint: str) -> List[Dict[str, Any]]:
 
 def get_submissions_by_content_hash(content_hash: str) -> List[Dict[str, Any]]:
     """Get all submissions with the same uploaded file hash"""
+    if _is_firestore_mode():
+        return [
+            sub for sub in get_all_submissions()
+            if sub.get("metadata", {}).get("content_hash") == content_hash
+        ]
+
     db = load_db()
     return [
         sub for sub in db.get("submissions", [])
@@ -348,6 +751,12 @@ def get_submissions_by_content_hash(content_hash: str) -> List[Dict[str, Any]]:
 
 def get_submissions_by_email(email: str) -> List[Dict[str, Any]]:
     """Get all submissions from a specific email"""
+    if _is_firestore_mode():
+        return [
+            sub for sub in get_all_submissions()
+            if sub.get("email") == email
+        ]
+
     db = load_db()
     return [
         sub for sub in db.get("submissions", [])
@@ -359,6 +768,18 @@ def get_recent_submissions(minutes: int = 10) -> List[Dict[str, Any]]:
     """Get submissions from the last N minutes"""
     from datetime import datetime, timedelta
     
+    if _is_firestore_mode():
+        cutoff_time = datetime.now() - timedelta(minutes=minutes)
+        recent = []
+        for sub in get_all_submissions():
+            try:
+                sub_time = datetime.fromisoformat(sub.get("timestamp", ""))
+                if sub_time > cutoff_time:
+                    recent.append(sub)
+            except Exception:
+                pass
+        return recent
+
     db = load_db()
     cutoff_time = datetime.now() - timedelta(minutes=minutes)
     
@@ -376,6 +797,20 @@ def get_recent_submissions(minutes: int = 10) -> List[Dict[str, Any]]:
 
 def link_accounts(fingerprint: str, emails: List[str]) -> Dict[str, Any]:
     """Get all accounts linked by a fingerprint"""
+    if _is_firestore_mode():
+        linked = list(dict.fromkeys(emails or []))
+
+        for sub in get_submissions_by_fingerprint(fingerprint):
+            email = sub.get("email")
+            if email not in linked:
+                linked.append(email)
+
+        return {
+            "fingerprint": fingerprint,
+            "linked_accounts": linked,
+            "account_count": len(linked)
+        }
+
     db = load_db()
     linked = list(dict.fromkeys(emails or []))
     
@@ -394,6 +829,15 @@ def link_accounts(fingerprint: str, emails: List[str]) -> Dict[str, Any]:
 
 def get_author_metadata_matches(author: str, creator: str) -> List[Dict[str, Any]]:
     """Find all submissions with matching author metadata"""
+    if _is_firestore_mode():
+        matches = []
+        for sub in get_all_submissions():
+            metadata = sub.get("metadata", {})
+            if (metadata.get("author") == author or 
+                metadata.get("creator") == creator):
+                matches.append(sub)
+        return matches
+
     db = load_db()
     matches = []
     
@@ -408,6 +852,10 @@ def get_author_metadata_matches(author: str, creator: str) -> List[Dict[str, Any
 
 def clear_db():
     """Clear all data (for testing)"""
+    if _is_firestore_mode():
+        _delete_firestore_collection()
+        return
+
     with LOCK:
         if DB_FILE.exists():
             DB_FILE.unlink()
@@ -416,6 +864,30 @@ def clear_db():
 
 def get_stats() -> Dict[str, Any]:
     """Get dashboard statistics"""
+    if _is_firestore_mode():
+        submissions = get_all_submissions()
+        total = len(submissions)
+        high_risk = 0
+        critical_risk = 0
+        total_score = 0
+
+        for sub in submissions:
+            score = sub.get("risk_score", 0)
+            total_score += score
+            if score >= 80:
+                critical_risk += 1
+            elif score >= 60:
+                high_risk += 1
+
+        avg_score = round(total_score / total, 1) if total > 0 else 0
+
+        return {
+            "total_submissions": total,
+            "high_risk_submissions": high_risk,
+            "critical_risk_submissions": critical_risk,
+            "average_risk_score": avg_score
+        }
+
     db = load_db()
     submissions = db.get("submissions", [])
     
@@ -440,12 +912,15 @@ def get_stats() -> Dict[str, Any]:
         "critical_risk_submissions": critical_risk,
         "average_risk_score": avg_score
     }
+```
 
+---
 
-================================================================================
-File: metadata_extractor.py
-================================================================================
+## metadata_extractor.py
 
+Extract and analyze metadata from PDF, DOCX, and TXT files.
+
+```python
 import hashlib
 import os
 from typing import Dict, Any, Optional
@@ -622,6 +1097,7 @@ def classify_document(text: str) -> Dict[str, str]:
     }
 
 
+
 def analyze_document_similarity(
     metadata1: Dict[str, Any],
     metadata2: Dict[str, Any]
@@ -668,12 +1144,15 @@ def analyze_document_similarity(
         "similarity_score": min(similarity_score, 100),
         "matching_fields": matching_fields
     }
+```
 
+---
 
-================================================================================
-File: risk_scoring.py
-================================================================================
+## risk_scoring.py
 
+Multi-layer fraud detection and risk scoring algorithm (5 layers).
+
+```python
 from typing import Dict, List, Any
 from datetime import datetime, timedelta
 import time
@@ -1078,12 +1557,15 @@ class RiskScorer:
             return "🔴 FLAG: High risk - likely spam/duplicate accounts"
         else:
             return "🚫 REJECT: Critical risk - suspected multi-account abuse"
+```
 
+---
 
-================================================================================
-File: users.py
-================================================================================
+## users.py
 
+Simple editor authentication module.
+
+```python
 """Shared user definitions for the single editor account."""
 
 from typing import Dict
@@ -1113,15 +1595,19 @@ def build_editor_session() -> Dict[str, str]:
 		"role": "editor",
 		"authenticated": True,
 	}
+```
 
+---
 
-================================================================================
-File: requirements.txt
-================================================================================
+## requirements.txt
 
+Python dependencies.
+
+```
 fastapi==0.104.1
 uvicorn==0.24.0
 python-multipart==0.0.6
+firebase-admin==6.5.0
 PyMuPDF==1.23.8
 python-docx==0.8.11
 redis==5.0.1
@@ -1136,28 +1622,47 @@ Pillow==10.1.0
 python-dotenv==1.0.0
 cors==1.0.1
 pydantic==2.5.0
+```
 
+---
 
-================================================================================
-                              END OF SOURCE CODE
-================================================================================
+## runtime.txt
 
-This is the complete source code for the AuthorPrint Backend API. All files have
-been included with their full content. The application consists of:
+Python runtime version (for Heroku/deployment).
 
-1. main.py - FastAPI application and endpoint definitions
-2. database.py - JSON-based database operations
-3. metadata_extractor.py - Document metadata extraction and processing
-4. risk_scoring.py - Multi-layer fraud detection risk scoring engine
-5. users.py - Editor account management
-6. requirements.txt - Python dependencies specification
+```
+python-3.11.7
+```
 
-Total Application Size: ~15KB of Python code
-Database: JSON-based (submissions_db.json)
-File Storage: Local uploads/ directory
+---
 
-For deployment, usage guides, and more information, refer to the readme.txt file.
+## Environment Variables (.env)
 
-================================================================================
-                         Last Updated: April 30, 2026
-================================================================================
+Create a `.env` file in the backend directory with:
+
+```
+BACKEND_URL=http://localhost:8000
+FRONTEND_URL=http://localhost:3000
+FIREBASE_PROJECT_ID=tnf-vibe-coding-challenge
+FIREBASE_STORAGE_BUCKET=tnf-vibe-coding-challenge.firebasestorage.app
+FIREBASE_CREDENTIALS_PATH=./credentials.json
+# OR:
+# FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+# FIREBASE_SERVICE_ACCOUNT_JSON_B64=eyJ0eXBlIjoic2VydmljZV9hY2NvdW50IiwuLi59
+```
+
+---
+
+## Running the Backend
+
+```bash
+python backend/main.py
+```
+
+Or with Uvicorn:
+
+```bash
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Visit `http://localhost:8000/docs` for interactive API documentation.
